@@ -2953,6 +2953,7 @@ namespace GridTools
     std::pair<typename MeshType<dim, spacedim>::active_cell_iterator,
               Point<dim>>
       cell_and_position_approx;
+    auto vertices = extract_used_vertices(mesh.get_triangulation(), mapping);
 
     if (relevant_cell_bounding_boxes_rtree != nullptr &&
         !relevant_cell_bounding_boxes_rtree->empty())
@@ -3075,7 +3076,7 @@ namespace GridTools
                 closest_vertex_index = GridTools::find_closest_vertex(
                   mapping, mesh, p, marked_vertices);
               }
-            vertex_to_point = p - mesh.get_vertices()[closest_vertex_index];
+            vertex_to_point = p - vertices[closest_vertex_index];
           }
 
 #ifdef DEBUG
