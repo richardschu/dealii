@@ -43,7 +43,7 @@ template<int dim>
 class Displacement : public Function<dim>
 {
 public:
-	Displacement() : Function<dim>(dim), factor(10) {}
+	Displacement() : Function<dim>(dim), factor(100) {}
 
 	virtual double value(dealii::Point<dim> const & point,
 	         	 unsigned int const         component) const override
@@ -184,7 +184,7 @@ void test()
 	  particle_output.write_vtu(filestream);
 	}
 
-	constexpr double tol = 1e-4;
+	constexpr double tol = 1e-5;
 	dealii::Utilities::MPI::RemotePointEvaluation<dim> rpe (tol);
 	rpe.reinit(points, tria, mapping);
 

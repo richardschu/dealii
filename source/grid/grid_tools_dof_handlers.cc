@@ -540,12 +540,6 @@ namespace GridTools
         // update the number of cells searched
         cells_searched += adjacent_cells.size();
 
-        // if the user provided a custom mask for vertices,
-        // terminate the search without trying to expand the search
-        // to all cells of the triangulation, as done below.
-        if (marked_vertices.size() > 0)
-          cells_searched = n_active_cells;
-
         // if we have not found the cell in
         // question and have not yet searched every
         // cell, we expand our search to
