@@ -46,76 +46,79 @@ class sample_function : public Function<dim>
 {
 public:
   virtual double value(const Point<dim>  &p,
-                        const unsigned int component = 0) const override;
+                       const unsigned int component = 0) const override;
 };
-  
+
 template <int dim>
 double sample_function<dim>::value(const Point<dim> &p,
-                                  const unsigned int) const
+                                   const unsigned int) const
 {
-  if constexpr(dim == 2)
-  {
-    return std::sin(p[0]*p[1]);
-  }
-  else if constexpr(dim == 3)
-  {
-    return std::sin(p[0]*p[1]*p[2]);
-  }
+  if constexpr (dim == 2)
+    {
+      return std::sin(p[0] * p[1]);
+    }
+  else if constexpr (dim == 3)
+    {
+      return std::sin(p[0] * p[1] * p[2]);
+    }
   else
-  {
-    return std::sin(p[0]);
-  }
+    {
+      return std::sin(p[0]);
+    }
 }
 
-template<int dim>
+template <int dim>
 class ArchiveVector
 {
 public:
-  using VectorType = LinearAlgebra::distributed::Vector<double>;
+  using VectorType        = LinearAlgebra::distributed::Vector<double>;
   using TriangulationType = parallel::distributed::Triangulation<dim>;
-  using SolutionTransferType = parallel::distributed::SolutionTransfer<dim, VectorType>;
+  using SolutionTransferType =
+    parallel::distributed::SolutionTransfer<dim, VectorType>;
 
   ArchiveVector();
 
-  void
-  run();
+  void run();
 
 private:
-  void
-  setup_and_serialize(unsigned int const fe_degree, unsigned int const n_refine_global) const;
+  void setup_and_serialize(const unsigned int fe_degree,
+                           const unsigned int n_refine_global) const;
 
-  template<int n_components>
-  void
-  output_vector(DoFHandler<dim> const & dof_handler, Mapping<dim> const & mapping, VectorType const & vector, std::string const & filename_basis) const;
+  template <int n_components>
+  void output_vector(const DoFHandler<dim> &dof_handler,
+                     const Mapping<dim>    &mapping,
+                     const VectorType      &vector,
+                     const std::string     &filename_basis) const;
 
   void
-  deserialize_and_check_hp_conversion(unsigned int const fe_degree, unsigned int const n_refine_global) const;
+  deserialize_and_check_hp_conversion(const unsigned int fe_degree,
+                                      const unsigned int n_refine_global) const;
 
-  void
-  deserialize_and_check_remote_point_evaluation(unsigned int const fe_degree, unsigned int const n_refine_global) const;
-  
-  MPI_Comm           mpi_comm;
-  ConditionalOStream pcout;
-  std::string const filename_reference = "checkpoint_reference";
-  unsigned int const fe_degree_reference = 2;
-  unsigned int const n_refine_global_reference = 4;
-  MappingQ<dim> const mapping(1);
+  void deserialize_and_check_remote_point_evaluation(
+    const unsigned int fe_degree,
+    const unsigned int n_refine_global) const;
+
+  MPI_Comm            mpi_comm;
+  ConditionalOStream  pcout;
+  std::string const   filename_reference        = "checkpoint_reference";
+  const unsigned int  fe_degree_reference       = 2;
+  const unsigned int  n_refine_global_reference = 4;
+  const MappingQ<dim> mapping;
 };
 
-template<int dim>
+template <int dim>
 ArchiveVector<dim>::ArchiveVector()
-  : mpi_comm(MPI_COMM_WORLD),
-    pcout(std::cout, (Utilities::MPI::this_mpi_process(mpi_comm) == 0))
-{
-}
+  : mpi_comm(MPI_COMM_WORLD)
+  , pcout(std::cout, (Utilities::MPI::this_mpi_process(mpi_comm) == 0))
+  , mapping(1)
+{}
 
-template<int dim>
-template<int n_components>
-void
-ArchiveVector<dim>::output_vector(DoFHandler<dim> const & dof_handler,
-                                  Mapping<dim> const & mapping,
-                                  VectorType const & vector,
-                                  std::string const & filename_basis) const
+template <int dim>
+template <int n_components>
+void ArchiveVector<dim>::output_vector(const DoFHandler<dim> &dof_handler,
+                                       const Mapping<dim>    &mapping,
+                                       const VectorType      &vector,
+                                       const std::string &filename_basis) const
 {
   pcout << "Exporting vector to vtu.\n";
 
@@ -134,65 +137,75 @@ ArchiveVector<dim>::output_vector(DoFHandler<dim> const & dof_handler,
   rel_vector = vector;
 
   // Vector entries are to be interpreted as components of a vector.
-  if constexpr(n_components > 1)
-  {
-    std::vector<dealii::DataComponentInterpretation::DataComponentInterpretation>
-      data_component_interpretation(
-        dim, dealii::DataComponentInterpretation::component_is_part_of_vector);
-    std::vector<std::string> solution_names(n_components, "vector");
-    data_out.add_data_vector(rel_vector,
-                             "vector",
-                             dealii::DataOut<dim>::type_dof_data,
-                             data_component_interpretation);
-  }
+  if constexpr (n_components > 1)
+    {
+      std::vector<
+        dealii::DataComponentInterpretation::DataComponentInterpretation>
+        data_component_interpretation(
+          dim,
+          dealii::DataComponentInterpretation::component_is_part_of_vector);
+      std::vector<std::string> solution_names(n_components, "vector");
+      data_out.add_data_vector(rel_vector,
+                               "vector",
+                               dealii::DataOut<dim>::type_dof_data,
+                               data_component_interpretation);
+    }
   else
-  {
-    data_out.add_data_vector(rel_vector, "vector");
-  }
+    {
+      data_out.add_data_vector(rel_vector, "vector");
+    }
 
-  auto const & triangulation = dof_handler.get_triangulation();
+  const auto &triangulation = dof_handler.get_triangulation();
 
   // Add vector indicating subdomain.
   Vector<float> subdomain;
-  if constexpr(true)
-  {
-    subdomain.reinit(triangulation.n_active_cells());
-    for(unsigned int i = 0; i < subdomain.size(); ++i)
+  if constexpr (true)
     {
-      subdomain(i) = triangulation.locally_owned_subdomain();
+      subdomain.reinit(triangulation.n_active_cells());
+      for (unsigned int i = 0; i < subdomain.size(); ++i)
+        {
+          subdomain(i) = triangulation.locally_owned_subdomain();
+        }
+      data_out.add_data_vector(subdomain, "subdomain");
     }
-    data_out.add_data_vector(subdomain, "subdomain");
-  }
 
   // Build patches.
   unsigned int n_subdivisions =
     triangulation.all_reference_cells_are_hyper_cube() ? 3 : 1;
-  data_out.build_patches(mapping, n_subdivisions, dealii::DataOut<dim>::curved_inner_cells);
+  data_out.build_patches(mapping,
+                         n_subdivisions,
+                         dealii::DataOut<dim>::curved_inner_cells);
 
   // Create vtu files + pvtu record.
-  std::string filename = "./" + filename_basis + "_p" +
-    dealii::Utilities::int_to_string(triangulation.locally_owned_subdomain(), 4);
+  std::string filename =
+    "./" + filename_basis + "_p" +
+    dealii::Utilities::int_to_string(triangulation.locally_owned_subdomain(),
+                                     4);
   std::ofstream output((filename + ".vtu").c_str());
   data_out.write_vtu(output);
 
   // Combine outputs using mpi-thread 0.
-  if(dealii::Utilities::MPI::this_mpi_process(mpi_comm) == 0)
-  {
-    std::vector<std::string> filenames;
-    for(unsigned int i = 0; i < dealii::Utilities::MPI::n_mpi_processes(mpi_comm); ++i)
+  if (dealii::Utilities::MPI::this_mpi_process(mpi_comm) == 0)
     {
-      filenames.push_back(filename_basis + "_p" + dealii::Utilities::int_to_string(i, 4) + ".vtu");
-    }
+      std::vector<std::string> filenames;
+      for (unsigned int i = 0;
+           i < dealii::Utilities::MPI::n_mpi_processes(mpi_comm);
+           ++i)
+        {
+          filenames.push_back(filename_basis + "_p" +
+                              dealii::Utilities::int_to_string(i, 4) + ".vtu");
+        }
 
-    // Combine outputs of individual threads.
-    std::ofstream master_output(("./" + filename_basis + ".pvtu").c_str());
-    data_out.write_pvtu_record(master_output, filenames);
-  }
+      // Combine outputs of individual threads.
+      std::ofstream master_output(("./" + filename_basis + ".pvtu").c_str());
+      data_out.write_pvtu_record(master_output, filenames);
+    }
 }
 
-template<int dim>
-void
-ArchiveVector<dim>::setup_and_serialize(unsigned int const fe_degree, unsigned int const n_refine_global) const
+template <int dim>
+void ArchiveVector<dim>::setup_and_serialize(
+  const unsigned int fe_degree,
+  const unsigned int n_refine_global) const
 {
   pcout << "Setting up and filling vector.\n";
 
@@ -205,11 +218,13 @@ ArchiveVector<dim>::setup_and_serialize(unsigned int const fe_degree, unsigned i
   dof_handler.distribute_dofs(fe);
 
   // Fill vector with function interpolation.
-  IndexSet rel_dofs; 
+  IndexSet rel_dofs;
   DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
   VectorType vector_out(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
-  
+
   VectorTools::interpolate(dof_handler, sample_function<dim>(), vector_out);
+
+  vector_out.update_ghost_values(); // was this really needed?
 
   // Output the vector.
   std::string const filename_basis = "reference";
@@ -219,22 +234,25 @@ ArchiveVector<dim>::setup_and_serialize(unsigned int const fe_degree, unsigned i
   SolutionTransferType solution_transfer(dof_handler);
   solution_transfer.prepare_for_serialization(vector_out);
 
-  pcout << "Serializing vector with " 
-        << "fe_degree = " << fe_degree << ", " 
+  pcout << "Serializing vector with "
+        << "fe_degree = " << fe_degree << ", "
         << "n_refine_global = " << n_refine_global << ".\n";
   triangulation.save(filename_reference);
 }
 
 
-template<int dim>
-void
-ArchiveVector<dim>::deserialize_and_check_hp_conversion(unsigned int const fe_degree, unsigned int const n_refine_global) const
+template <int dim>
+void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
+  const unsigned int fe_degree,
+  const unsigned int n_refine_global) const
 {
-  pcout << "Deserializing and checking vector with " 
-        << "fe_degree = " << fe_degree << ", " 
+  pcout << "Deserializing and checking vector with "
+        << "fe_degree = " << fe_degree << ", "
         << "n_refine_global = " << n_refine_global << ".\n";
 
   TriangulationType triangulation_reference(mpi_comm);
+  GridGenerator::hyper_cube(
+    triangulation_reference); // ##+ maybe also store the coarse mesh??
   triangulation_reference.load(filename_reference);
 
   // Perform here the hp-refinement/coarsening.
@@ -247,65 +265,62 @@ ArchiveVector<dim>::deserialize_and_check_hp_conversion(unsigned int const fe_de
   // DoFHandler<dim> dof_handler(triangulation);
   // const FE_Q<dim> fe(fe_degree);
   // dof_handler.distribute_dofs(fe);
-
-  // temporary for checking ##+
-  std::string const filename_basis = "comparison_degree_" + std::to_string(fe_degree) + "_refine_" + std::to_string(n_refine_global);
-  DoFHandler<dim> dof_handler(triangulation);
-  const FE_Q<dim> fe(fe_degree);
-  dof_handler.distribute_dofs(fe);
-  output_vector<1>(dof_handler, mapping, vector_out, filename_basis);
-
-
 }
 
-template<int dim>
-void
-deserialize_and_check_remote_point_evaluation(unsigned int const fe_degree, unsigned int const n_refine_global) const
+template <int dim>
+void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation(
+  const unsigned int fe_degree,
+  const unsigned int n_refine_global) const
 {
-  // this will use remote point evaluation to interpolate the solution on the serialized grid.
+  // this will use remote point evaluation to interpolate the solution on the
+  // serialized grid.
+  (void)fe_degree;
+  (void)n_refine_global;
 }
 
-template<int dim>
-void
-ArchiveVector<dim>::run()
+template <int dim>
+void ArchiveVector<dim>::run()
 {
   setup_and_serialize(fe_degree_reference, n_refine_global_reference);
-  deserialize_and_check_hp_conversion(3,3);
+  deserialize_and_check_hp_conversion(3, 3);
   deserialize_and_check_remote_point_evaluation(3, 3);
 }
 
-int
-main(int argc, char * argv[])
+int main(int argc, char *argv[])
 {
   try
-  {
-    Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
+    {
+      Utilities::MPI::MPI_InitFinalize mpi_initialization(argc, argv, 1);
 
-    ArchiveVector<3> archive_vector;
-    archive_vector.run();
-  }
-  catch(std::exception & exc)
-  {
-    std::cerr << std::endl
-              << std::endl
-              << "----------------------------------------------------" << std::endl;
-    std::cerr << "Exception on processing: " << std::endl
-              << exc.what() << std::endl
-              << "Aborting!" << std::endl
-              << "----------------------------------------------------" << std::endl;
+      ArchiveVector<3> archive_vector;
+      archive_vector.run();
+    }
+  catch (std::exception &exc)
+    {
+      std::cerr << std::endl
+                << std::endl
+                << "----------------------------------------------------"
+                << std::endl;
+      std::cerr << "Exception on processing: " << std::endl
+                << exc.what() << std::endl
+                << "Aborting!" << std::endl
+                << "----------------------------------------------------"
+                << std::endl;
 
-    return 1;
-  }
-  catch(...)
-  {
-    std::cerr << std::endl
-              << std::endl
-              << "----------------------------------------------------" << std::endl;
-    std::cerr << "Unknown exception!" << std::endl
-              << "Aborting!" << std::endl
-              << "----------------------------------------------------" << std::endl;
-    return 1;
-  }
+      return 1;
+    }
+  catch (...)
+    {
+      std::cerr << std::endl
+                << std::endl
+                << "----------------------------------------------------"
+                << std::endl;
+      std::cerr << "Unknown exception!" << std::endl
+                << "Aborting!" << std::endl
+                << "----------------------------------------------------"
+                << std::endl;
+      return 1;
+    }
 
   return 0;
 }
