@@ -35,9 +35,14 @@
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/fe/fe_q.h>
 #include <deal.II/grid/grid_generator.h>
+#include <deal.II/grid/tria.h>
 #include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/numerics/vector_tools.h>
 #include <deal.II/numerics/data_out.h>
+
+// // boost
+// #include <boost/archive/text_iarchive.hpp>
+// #include <boost/archive/text_oarchive.hpp>
 
 using namespace dealii;
 
@@ -208,38 +213,47 @@ void ArchiveVector<dim>::setup_and_serialize(
   const unsigned int n_refine_global) const
 {
   pcout << "Setting up and filling vector.\n";
+  
+  // Create and serialize coarse triangulation.
+  Triangulation<dim> coarse_triangulation;
+  GridGenerator::hyper_cube(coarse_triangulation);
+  if(Utilities::MPI::this_mpi_process(mpi_comm) == 0)
+    {
+      coarse_triangulation.save("coarse_triangulation");
+    }
 
+  // Create triangulation based on coarse triangulation.
   TriangulationType triangulation(mpi_comm);
-  GridGenerator::hyper_cube(triangulation);
+  triangulation.copy_triangulation(coarse_triangulation);
+  coarse_triangulation.clear();
   triangulation.refine_global(n_refine_global);
 
+  // Setup DoFs and fill vector with function interpolation.
   DoFHandler<dim> dof_handler(triangulation);
   const FE_Q<dim> fe(fe_degree);
   dof_handler.distribute_dofs(fe);
 
-  // Fill vector with function interpolation.
   IndexSet rel_dofs;
   DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
-  VectorType vector_out(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
+  VectorType vector(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
 
-  VectorTools::interpolate(dof_handler, sample_function<dim>(), vector_out);
+  VectorTools::interpolate(dof_handler, sample_function<dim>(), vector);
 
-  vector_out.update_ghost_values(); // was this really needed?
+  vector.update_ghost_values(); // turned out to be required
 
   // Output the vector.
-  std::string const filename_basis = "reference";
-  output_vector<1>(dof_handler, mapping, vector_out, filename_basis);
+  pcout << "output vector.l2_norm() = " << vector.l2_norm() << "\n";
+  output_vector<1>(dof_handler, mapping, vector, "reference");
 
   // Serialize the vector using SolutionTransferType.
   SolutionTransferType solution_transfer(dof_handler);
-  solution_transfer.prepare_for_serialization(vector_out);
+  solution_transfer.prepare_for_serialization(vector);
 
   pcout << "Serializing vector with "
         << "fe_degree = " << fe_degree << ", "
         << "n_refine_global = " << n_refine_global << ".\n";
   triangulation.save(filename_reference);
 }
-
 
 template <int dim>
 void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
@@ -250,10 +264,33 @@ void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
         << "fe_degree = " << fe_degree << ", "
         << "n_refine_global = " << n_refine_global << ".\n";
 
-  TriangulationType triangulation_reference(mpi_comm);
-  GridGenerator::hyper_cube(
-    triangulation_reference); // ##+ maybe also store the coarse mesh??
-  triangulation_reference.load(filename_reference);
+  // Deserialize the coarse triangulation.
+  Triangulation<dim> coarse_triangulation;
+  coarse_triangulation.load("coarse_triangulation");
+
+  // Deserialize the triangulation. That is, recreate the coarse mesh 
+  // in some way, and then call `load()` to deserialize the triangulation. 
+  TriangulationType triangulation(mpi_comm);
+  triangulation.copy_triangulation(coarse_triangulation);
+  triangulation.load(filename_reference);
+
+  // Deserialize the vector as stored in the triangulation.
+  DoFHandler<dim> dof_handler(triangulation);
+  const FE_Q<dim> fe(fe_degree_reference);
+  dof_handler.distribute_dofs(fe);
+
+  IndexSet rel_dofs;
+  DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
+  VectorType vector(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
+  
+  SolutionTransferType solution_transfer(dof_handler);
+  solution_transfer.deserialize(vector);
+  
+  vector.update_ghost_values(); // turned out to be required (?)
+
+  // Output the vector.
+  pcout << "output vector.l2_norm() = " << vector.l2_norm() << "\n";
+  output_vector<1>(dof_handler, mapping, vector, "comparison");
 
   // Perform here the hp-refinement/coarsening.
   // OR
@@ -282,8 +319,10 @@ template <int dim>
 void ArchiveVector<dim>::run()
 {
   setup_and_serialize(fe_degree_reference, n_refine_global_reference);
+  
   deserialize_and_check_hp_conversion(3, 3);
-  deserialize_and_check_remote_point_evaluation(3, 3);
+  
+  // deserialize_and_check_remote_point_evaluation(3, 3);
 }
 
 int main(int argc, char *argv[])
