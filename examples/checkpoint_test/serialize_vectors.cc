@@ -36,6 +36,7 @@
 #include <deal.II/fe/fe_q.h>
 #include <deal.II/grid/grid_generator.h>
 #include <deal.II/grid/tria.h>
+#include <deal.II/hp/fe_collection.h>
 #include <deal.II/lac/la_parallel_vector.h>
 #include <deal.II/numerics/vector_tools.h>
 #include <deal.II/numerics/data_out.h>
@@ -98,6 +99,17 @@ private:
   void
   deserialize_and_check_hp_conversion(const unsigned int fe_degree,
                                       const unsigned int n_refine_global) const;
+
+  void deserialize(TriangulationType & triangulation,
+                   VectorType &        vector) const;
+
+  void 
+  hp_conversion(VectorType const &   vector_in,
+                Triangulation<dim> & triangulation,
+                unsigned int const   fe_degree_in,
+                unsigned int const   n_refine_global_in,
+                unsigned int const   fe_degree_out,
+                unsigned int const   n_refine_global_out) const;
 
   void deserialize_and_check_remote_point_evaluation(
     const unsigned int fe_degree,
@@ -256,13 +268,10 @@ void ArchiveVector<dim>::setup_and_serialize(
 }
 
 template <int dim>
-void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
-  const unsigned int fe_degree,
-  const unsigned int n_refine_global) const
+void ArchiveVector<dim>::deserialize(TriangulationType & triangulation,
+                                     VectorType &        vector) const
 {
-  pcout << "Deserializing and checking vector with "
-        << "fe_degree = " << fe_degree << ", "
-        << "n_refine_global = " << n_refine_global << ".\n";
+  pcout << "Deserializing and checking vector.\n";
 
   // Deserialize the coarse triangulation.
   Triangulation<dim> coarse_triangulation;
@@ -270,7 +279,6 @@ void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
 
   // Deserialize the triangulation. That is, recreate the coarse mesh 
   // in some way, and then call `load()` to deserialize the triangulation. 
-  TriangulationType triangulation(mpi_comm);
   triangulation.copy_triangulation(coarse_triangulation);
   triangulation.load(filename_reference);
 
@@ -281,27 +289,165 @@ void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
 
   IndexSet rel_dofs;
   DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
-  VectorType vector(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
+  vector.reinit(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
   
   SolutionTransferType solution_transfer(dof_handler);
   solution_transfer.deserialize(vector);
-  
-  vector.update_ghost_values(); // turned out to be required (?)
 
   // Output the vector.
   pcout << "output vector.l2_norm() = " << vector.l2_norm() << "\n";
-  output_vector<1>(dof_handler, mapping, vector, "comparison");
+  output_vector<1>(dof_handler, mapping, vector, "reference_read_back");
+}
 
-  // Perform here the hp-refinement/coarsening.
-  // OR
-  // Perform some grid-to-grid interpolation using RemotePointEvaluation.
+template <int dim>
+void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
+  const unsigned int fe_degree,
+  const unsigned int n_refine_global) const
+{
+  pcout << "Deserializing and checking vector with "
+        << "fe_degree = " << fe_degree << ", "
+        << "n_refine_global = " << n_refine_global << ".\n";
 
-  // Target has similar domain but can use entirely different FE space.
-  // GridGenerator::hyper_cube(triangulation);
-  // triangulation.refine_global(n_refine_global);
-  // DoFHandler<dim> dof_handler(triangulation);
-  // const FE_Q<dim> fe(fe_degree);
-  // dof_handler.distribute_dofs(fe);
+  TriangulationType triangulation(mpi_comm);
+  VectorType vector;
+  deserialize(triangulation, vector);
+
+  hp_conversion(vector, triangulation, fe_degree_reference, n_refine_global_reference, fe_degree, n_refine_global);
+}
+
+// Utility function to perform hp conversion in the same grid using FE_Q elements.
+template<int dim>
+void ArchiveVector<dim>::hp_conversion(VectorType const &      vector_in,
+                                       Triangulation<dim> &    triangulation,
+                                       unsigned int const      fe_degree_in,
+                                       unsigned int const      n_refine_global_in,
+                                       unsigned int const      fe_degree_out,
+                                       unsigned int const      n_refine_global_out) const
+{
+  // Setup new DoFHandler with FE_Q elements.
+  DoFHandler<dim> dof_handler_combined(triangulation);
+  
+  FE_Q<dim> fe_in(fe_degree_in);
+  FE_Q<dim> fe_out(fe_degree_out);
+  hp::FECollection<dim> fe_collection(fe_in, fe_out);
+
+  for(const auto & cell : dof_handler_combined.active_cell_iterators())
+  {
+    if(cell->is_locally_owned())
+    {
+      cell->set_active_fe_index(0);
+    }
+  }
+
+  dof_handler_combined.distribute_dofs(fe_collection);
+
+  VectorType vector_out(dof_handler_combined.locally_owned_dofs(), mpi_comm);
+  vector_out = vector_in;
+
+  dealii::IndexSet                  relevant_dofs;
+  dealii::DoFTools::extract_locally_relevant_dofs(dof_handler_combined, relevant_dofs); // RELEVANT DOFS EXTRACTED HERE
+
+  unsigned int current_refinement_lvl = n_refine_global_in;
+  bool p_conversion_done = false;
+  while(not p_conversion_done and current_refinement_lvl != n_refine_global_out)
+  {
+    VectorType rel_vector_out;
+    rel_vector_out.reinit(dof_handler_combined.locally_owned_dofs(), relevant_dofs, mpi_comm);
+    rel_vector_out = vector_out;
+
+    // Set FUTURE FE index such that more expensive conversions are done last.
+    bool p_conversion_done_in_this_cycle = false; 
+    if(not p_conversion_done)
+    {
+      if(fe_degree_out <= fe_degree_in)
+      {
+        pcout << "  performing p conversion in first cycle since " << fe_degree_out << " <= " << "fe_degree_in" << " \n";
+
+        // Conversion in the first cycle renders later cycles cheaper.
+        for(const auto & cell : dof_handler_combined.active_cell_iterators())
+        {
+          if(cell->is_locally_owned())
+          {
+            cell->set_future_fe_index(1);
+          }
+        }
+        p_conversion_done_in_this_cycle = true;
+      }
+      else
+      {
+        // Conversion in the last cycle renders earlier cycles cheaper.
+        if(std::abs(static_cast<int>(n_refine_global_out) - static_cast<int>(current_refinement_lvl)) == 1)
+        {
+          pcout << "  performing p conversion in last cycle since " << fe_degree_out << " > " << fe_degree_in << " \n";
+
+          for(const auto & cell : dof_handler_combined.active_cell_iterators())
+          {
+            if(cell->is_locally_owned())
+            {
+              cell->set_future_fe_index(1);
+            }
+          }
+          p_conversion_done_in_this_cycle = true;
+        }
+      }
+    }
+
+    // Flag for h refinement/coarsening.
+    if(current_refinement_lvl < n_refine_global_out)
+    {
+      pcout << "  flags for refining in space\n";
+      triangulation.set_all_refine_flags();
+      current_refinement_lvl += 1;
+    }
+    else if(current_refinement_lvl > n_refine_global_out)
+    {
+      pcout << "  flags coarsening in space\n";
+      for(auto const & cell : triangulation.active_cell_iterators())
+      {
+        cell->clear_refine_flag();
+        cell->set_coarsen_flag();
+      }
+      current_refinement_lvl -= 1;
+    }
+
+    // Prepare for coarsening and refinement.
+    pcout << "  preparing for coarsening and refinement\n";
+    triangulation.prepare_coarsening_and_refinement();
+    SolutionTransferType solution_transfer(dof_handler_combined, true /* average_values */);
+    solution_transfer.prepare_for_coarsening_and_refinement(rel_vector_out);
+
+    pcout << "executing coarsening and refinement\n";
+    triangulation.execute_coarsening_and_refinement();
+
+    // Set ACTIVE FE index such that more expensive conversions are done last.
+    // Same logic as above, we convert all FEs in the same cycle, so we simply use one bool instead of repeating the logic here.  
+    if(p_conversion_done_in_this_cycle)
+    {
+      for(const auto & cell : dof_handler_combined.active_cell_iterators())
+      {
+        if(cell->is_locally_owned())
+        {
+          cell->set_active_fe_index(1);
+        }
+      }
+      p_conversion_done = true;
+    }
+
+    dof_handler_combined.distribute_dofs(fe_collection);
+    relevant_dofs = dealii::DoFTools::extract_locally_relevant_dofs(dof_handler_combined);
+    rel_vector_out.reinit(dof_handler_combined.locally_owned_dofs(), relevant_dofs, mpi_comm);
+
+    pcout << "-> interpolating solution in new FE space\n";
+    solution_transfer.interpolate(rel_vector_out);
+
+    vector_out.reinit(dof_handler_combined.locally_owned_dofs(), mpi_comm);
+    vector_out = rel_vector_out;
+  }
+
+  // Output the vector.
+  pcout << "output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
+  output_vector<1>(dof_handler_combined, mapping, vector_out, 
+    "comparison_p_" + std::to_string(fe_degree_out) + "_lvl_" + std::to_string(n_refine_global_out));
 }
 
 template <int dim>
@@ -318,11 +464,17 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation(
 template <int dim>
 void ArchiveVector<dim>::run()
 {
-  setup_and_serialize(fe_degree_reference, n_refine_global_reference);
   
-  deserialize_and_check_hp_conversion(3, 3);
+  // Serialization and deserialization can be run using a different
+  // number of MPI ranks. To test this, uncomment the following, run
+  // the serialization, and then run the deserialization with a different
+  // number of MPI ranks.
+
+  // setup_and_serialize(fe_degree_reference, n_refine_global_reference);
+
+  deserialize_and_check_hp_conversion(4, 2);
   
-  // deserialize_and_check_remote_point_evaluation(3, 3);
+  deserialize_and_check_remote_point_evaluation(4, 2);
 }
 
 int main(int argc, char *argv[])
