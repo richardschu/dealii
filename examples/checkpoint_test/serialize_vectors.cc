@@ -122,7 +122,8 @@ private:
                      std::string const &                     filename) const;
 
   template <int fe_degree>
-  std::vector<Point<dim>> collect_integration_points(DoFHandler<dim> const & dof_handler) const;                     
+  std::vector<Point<dim>> collect_integration_points(DoFHandler<dim> const & dof_handler,
+                                                     Quadrature<dim> const & quadrature) const;                     
 
   MPI_Comm            mpi_comm;
   ConditionalOStream  pcout;
@@ -473,19 +474,16 @@ void ArchiveVector<dim>::output_points(Triangulation<dim> const &              t
 
   Particles::DataOut<dim, dim> particle_output;
   particle_output.build_patches(particle_handler);
-  particle_output.write_vtu_with_pvtu_record("./", filename, 8 /* n_digits_for_counter */, mpi_comm);
+  particle_output.write_vtu_with_pvtu_record("./", filename, 0 /* counter */, mpi_comm);
 }
 
 template <int dim>
 template <int fe_degree>
 std::vector<Point<dim>>
-ArchiveVector<dim>::collect_integration_points(DoFHandler<dim> const & dof_handler) const
+ArchiveVector<dim>::collect_integration_points(DoFHandler<dim> const & dof_handler,
+                                               Quadrature<dim> const & quadrature) const
 {
   Triangulation<dim> const & triangulation = dof_handler.get_triangulation();
-
-  // Create integration rule sufficient to project the function to an FE space of degree fe_degree.
-  unsigned int constexpr n_q_points_1d = fe_degree + 1;
-  QGauss<dim> quadrature(n_q_points_1d);
   
   using VectorizedArrayType = VectorizedArray<double>;
   typename MatrixFree<dim, double, VectorizedArrayType>::AdditionalData additional_data;
@@ -495,7 +493,7 @@ ArchiveVector<dim>::collect_integration_points(DoFHandler<dim> const & dof_handl
   MatrixFree<dim, double, VectorizedArrayType> matrix_free;
   AffineConstraints<double> empty_constraints;
   matrix_free.reinit(mapping, dof_handler, empty_constraints, quadrature, additional_data);
-  FEEvaluation<dim, fe_degree, n_q_points_1d, 1 /* n_components */, double> fe_eval(matrix_free);  
+  FEEvaluation<dim, fe_degree, fe_degree + 1, 1 /* n_components */, double> fe_eval(matrix_free);  
 
   std::vector<Point<dim>> points;
   points.reserve(triangulation.n_active_cells() * quadrature.size()); // conservative estimate
@@ -555,21 +553,28 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation(
   dof_handler_target.distribute_dofs(fe);
 
   // Collect integration points from target grid.
-  std::vector<Point<dim>> const integration_points = collect_integration_points<fe_degree>(dof_handler_target);
+  QGauss<dim> quadrature(fe_degree + 1);
+  std::vector<Point<dim>> const integration_points = collect_integration_points<fe_degree>(dof_handler_target, quadrature);
 
   // Setup RemotePointEvaluation.
 
   // Solve projection on the target grid querying RemotePointEvaluation.
-  // IndexSet rel_dofs;
-  // DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
-  // vector.reinit(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
+  VectorType vector_target(dof_handler_target.locally_owned_dofs(), mpi_comm);
+  AffineConstraints<double> empty_constraints;
+  empty_constraints.close();
+  VectorTools::project(mapping,
+                       dof_handler_target,
+                       empty_constraints,
+                       quadrature,
+                       sample_function<dim>(),
+                       vector_target);
 
+  output_vector<1>(dof_handler_target, mapping, vector_target, "target");
 }
 
 template <int dim>
 void ArchiveVector<dim>::run()
 {
-  
   // Serialization and deserialization can be run using a different
   // number of MPI ranks. To test this, uncomment the following, run
   // the serialization, and then run the deserialization with a different
