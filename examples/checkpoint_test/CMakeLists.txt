@@ -3,7 +3,7 @@
 ##
 
 # Set the name of the project and target:
-set(TARGET "serialize_vectors")
+set(TARGET "main")
 
 # Declare all source files the target consists of. Here, this is only
 # the one step-X.cc file, but as you expand your project you may wish
@@ -16,7 +16,7 @@ set(TARGET "serialize_vectors")
 # in the "CMake in user projects" page accessible from the "User info"
 # page of the documentation.
 set(TARGET_SRC
-  ${TARGET}.cc
+  serialize_vectors_raviart_thomas_nodal.cc
   )
 
 # Usually, you will not need to modify anything beyond this point...
