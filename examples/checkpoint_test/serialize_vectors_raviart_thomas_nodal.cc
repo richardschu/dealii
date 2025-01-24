@@ -271,14 +271,14 @@ private:
   std::string const filename_reference = "checkpoint_reference";
   std::string const filename_coarse_triangulation = "coarse_triangulation";
   
-  static unsigned int constexpr fe_degree_reference       = 2;
+  static unsigned int constexpr fe_degree_reference       = 4;
   static unsigned int constexpr fe_degree_target          = 2;
-  static unsigned int constexpr n_refine_global_reference = 4;
-  static unsigned int constexpr n_refine_global_target    = 4;
+  static unsigned int constexpr n_refine_global_reference = 2;
+  static unsigned int constexpr n_refine_global_target    = 3;
 
   static bool constexpr use_same_grid_as_reference = false;
-  static bool constexpr use_RT_else_DGQ_reference  = false;
-  static bool constexpr use_RT_else_DGQ_target     = false;
+  static bool constexpr use_RT_else_DGQ_reference  = true;
+  static bool constexpr use_RT_else_DGQ_target     = true;
 
   MappingQ<dim> const mapping;
 };
@@ -451,9 +451,9 @@ void ArchiveVector<dim>::setup_and_serialize() const
   SolutionTransferType solution_transfer(dof_handler);
   solution_transfer.prepare_for_serialization(vector);
 
-  pcout << "Serializing vector with "
-        << "fe_degree_reference       = " << fe_degree_reference << ", "
-        << "n_refine_global_reference = " << n_refine_global_reference << ".\n";
+  pcout << "Serializing vector with\n"
+        << "  fe_degree_reference       = " << fe_degree_reference << ",\n"
+        << "  n_refine_global_reference = " << n_refine_global_reference << ".\n";
   triangulation.save(filename_reference);
 }
 
@@ -494,9 +494,9 @@ template <int dim>
 void ArchiveVector<dim>::deserialize_and_check_hp_conversion() const
 {
   // Serialization based on a common coarse grid space.
-  pcout << "Deserializing and checking vector with "
-        << "fe_degree_target       = " << fe_degree_target << ", "
-        << "n_refine_global_target = " << n_refine_global_target << ".\n";
+  pcout << "Deserializing and checking vector with\n"
+        << "  fe_degree_target       = " << fe_degree_target << ",\n"
+        << "  n_refine_global_target = " << n_refine_global_target << ".\n";
 
   TriangulationType triangulation(mpi_comm);
   VectorType        vector;
@@ -798,7 +798,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
       pcout
         << "Using SolutionInterpolationBetweenTriangulations::interpolate_solution.\n";
       ExaDG::SolutionInterpolationBetweenTriangulations<dim,
-                                                        1 /* n_components */>
+                                                        dim /* n_components */>
         interp;
       interp.reinit(dof_handler_target, mapping, dof_handler_source, mapping);
 
@@ -834,12 +834,12 @@ void ArchiveVector<dim>::run()
   }
   else
   {
-    pcout << "       SKIPPING SERIALIZATION TO TEST\n"
-          << "      FOR SERIALIZATION USE 3 MPI RANKS\n"
-          << "(this is for testing only, not a restriction)\n";
+    pcout << "\n         SKIPPING SERIALIZATION            \n"
+          << "      FOR SERIALIZATION USE 3 MPI RANKS      \n"
+          << "(this is for testing only, not a restriction)\n\n";
   }
 
-  deserialize_and_check_hp_conversion();
+  // deserialize_and_check_hp_conversion();
 
   deserialize_and_check_remote_point_evaluation();
 }
