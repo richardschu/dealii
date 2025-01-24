@@ -37,6 +37,7 @@
 #include <deal.II/dofs/dof_tools.h>
 #include <deal.II/fe/fe_q.h>
 #include <deal.II/fe/fe_raviart_thomas.h>
+#include <deal.II/fe/fe_system.h>
 #include <deal.II/grid/grid_generator.h>
 #include <deal.II/grid/tria.h>
 #include <deal.II/hp/fe_collection.h>
@@ -55,26 +56,21 @@ template <int dim>
 class sample_function : public Function<dim>
 {
 public:
-  virtual double value(const Point<dim>  &p,
-                       const unsigned int component = 0) const override;
+  sample_function()
+    : Function<dim>(dim)
+  {}
+
+  virtual void vector_value(const Point<dim>  &p,
+                            Vector<double>    &values) const override;
 };
 
 template <int dim>
-double sample_function<dim>::value(const Point<dim> &p,
-                                   const unsigned int) const
+void sample_function<dim>::vector_value(const Point<dim> &p,
+                                        Vector<double>   &values) const
 {
-  if constexpr (dim == 2)
-    {
-      return std::sin(p[0] * p[1]);
-    }
-  else if constexpr (dim == 3)
-    {
-      return std::sin(p[0] * p[1] * p[2]);
-    }
-  else
-    {
-      return std::sin(p[0]);
-    }
+  values[0]   = std::sin(10.0 * p[0]);
+  values[1]   = std::sin(5.0 * p[1]);
+  values[dim-1] = std::sin(1.0 * p[dim-1]);
 }
 
 namespace ExaDG // exadg/include/exacg/operators/solution_interpolation_between_triangulations.h
@@ -237,8 +233,7 @@ public:
   void run();
 
 private:
-  void setup_and_serialize(const unsigned int fe_degree,
-                           const unsigned int n_refine_global) const;
+  void setup_and_serialize() const;
 
   template <int n_components>
   void output_vector(const DoFHandler<dim> &dof_handler,
@@ -247,39 +242,45 @@ private:
                      const std::string     &filename_basis) const;
 
   void
-  deserialize_and_check_hp_conversion(const unsigned int fe_degree,
-                                      const unsigned int n_refine_global) const;
+  deserialize_and_check_hp_conversion() const;
 
   void deserialize(TriangulationType &triangulation,
                    DoFHandler<dim>   &dof_handler,
                    VectorType        &vector) const;
 
   void hp_conversion(const VectorType   &vector_in,
-                     Triangulation<dim> &triangulation,
-                     const unsigned int  fe_degree_in,
-                     const unsigned int  n_refine_global_in,
-                     const unsigned int  fe_degree_out,
-                     const unsigned int  n_refine_global_out) const;
+                     Triangulation<dim> &triangulation) const;
 
-  template <int fe_degree>
-  void deserialize_and_check_remote_point_evaluation(
-    const unsigned int n_refine_global) const;
+  void deserialize_and_check_remote_point_evaluation() const;
 
   void output_points(const Triangulation<dim>              &triangulation,
                      const std::vector<dealii::Point<dim>> &points,
                      const std::string                     &filename) const;
 
-  template <int fe_degree>
   std::vector<Point<dim>>
   collect_integration_points(const DoFHandler<dim> &dof_handler,
                              const Quadrature<dim> &quadrature) const;
 
+  std::shared_ptr<FiniteElement<dim> const> get_fe_reference() const;
+
+  std::shared_ptr<FiniteElement<dim> const> get_fe_target() const;
+
   MPI_Comm            mpi_comm;
   ConditionalOStream  pcout;
-  std::string const   filename_reference        = "checkpoint_reference";
-  const unsigned int  fe_degree_reference       = 2;
-  const unsigned int  n_refine_global_reference = 4;
-  const MappingQ<dim> mapping;
+
+  std::string const filename_reference = "checkpoint_reference";
+  std::string const filename_coarse_triangulation = "coarse_triangulation";
+  
+  static unsigned int constexpr fe_degree_reference       = 2;
+  static unsigned int constexpr fe_degree_target          = 2;
+  static unsigned int constexpr n_refine_global_reference = 4;
+  static unsigned int constexpr n_refine_global_target    = 4;
+
+  static bool constexpr use_same_grid_as_reference = false;
+  static bool constexpr use_RT_else_DGQ_reference  = false;
+  static bool constexpr use_RT_else_DGQ_target     = false;
+
+  MappingQ<dim> const mapping;
 };
 
 template <int dim>
@@ -287,7 +288,40 @@ ArchiveVector<dim>::ArchiveVector()
   : mpi_comm(MPI_COMM_WORLD)
   , pcout(std::cout, (Utilities::MPI::this_mpi_process(mpi_comm) == 0))
   , mapping(1)
-{}
+{
+}
+
+template <int dim>
+std::shared_ptr<FiniteElement<dim> const>
+ArchiveVector<dim>::get_fe_reference() const
+{
+  std::shared_ptr<FiniteElement<dim> const> fe;
+  if(use_RT_else_DGQ_reference)
+    {
+      fe = std::make_shared<FE_RaviartThomasNodal<dim>>(fe_degree_reference - 1);
+    }
+  else
+    {
+      fe = std::make_shared<FESystem<dim>>(FE_Q<dim>(fe_degree_reference), dim);
+    }
+  return fe;
+}
+
+template <int dim>
+std::shared_ptr<FiniteElement<dim> const>
+ArchiveVector<dim>::get_fe_target() const
+{
+  std::shared_ptr<FiniteElement<dim> const> fe;
+  if(use_RT_else_DGQ_target)
+    {
+      fe = std::make_shared<FE_RaviartThomasNodal<dim>>(fe_degree_target - 1);
+    }
+  else
+    {
+      fe = std::make_shared<FESystem<dim>>(FE_Q<dim>(fe_degree_target), dim);
+    }
+  return fe;
+}         
 
 template <int dim>
 template <int n_components>
@@ -331,7 +365,7 @@ void ArchiveVector<dim>::output_vector(const DoFHandler<dim> &dof_handler,
       data_out.add_data_vector(rel_vector, "vector");
     }
 
-  const auto &triangulation = dof_handler.get_triangulation();
+  auto const &triangulation = dof_handler.get_triangulation();
 
   // Add vector indicating subdomain.
   Vector<float> subdomain;
@@ -379,9 +413,7 @@ void ArchiveVector<dim>::output_vector(const DoFHandler<dim> &dof_handler,
 }
 
 template <int dim>
-void ArchiveVector<dim>::setup_and_serialize(
-  const unsigned int fe_degree,
-  const unsigned int n_refine_global) const
+void ArchiveVector<dim>::setup_and_serialize() const
 {
   pcout << "Setting up and filling vector.\n";
 
@@ -390,19 +422,18 @@ void ArchiveVector<dim>::setup_and_serialize(
   GridGenerator::hyper_cube(coarse_triangulation);
   if (Utilities::MPI::this_mpi_process(mpi_comm) == 0)
     {
-      coarse_triangulation.save("coarse_triangulation");
+      coarse_triangulation.save(filename_coarse_triangulation);
     }
 
   // Create triangulation based on coarse triangulation.
   TriangulationType triangulation(mpi_comm);
   triangulation.copy_triangulation(coarse_triangulation);
   coarse_triangulation.clear();
-  triangulation.refine_global(n_refine_global);
+  triangulation.refine_global(n_refine_global_reference);
 
   // Setup DoFs and fill vector with function interpolation.
   DoFHandler<dim> dof_handler(triangulation);
-  FE_Q<dim> const fe(fe_degree);
-  dof_handler.distribute_dofs(fe);
+  dof_handler.distribute_dofs(*get_fe_reference());
 
   IndexSet rel_dofs;
   DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
@@ -414,15 +445,15 @@ void ArchiveVector<dim>::setup_and_serialize(
 
   // Output the vector.
   pcout << "output vector.l2_norm() = " << vector.l2_norm() << "\n";
-  output_vector<1>(dof_handler, mapping, vector, "reference");
+  output_vector<dim>(dof_handler, mapping, vector, "reference");
 
   // Serialize the vector using SolutionTransferType.
   SolutionTransferType solution_transfer(dof_handler);
   solution_transfer.prepare_for_serialization(vector);
 
   pcout << "Serializing vector with "
-        << "fe_degree = " << fe_degree << ", "
-        << "n_refine_global = " << n_refine_global << ".\n";
+        << "fe_degree_reference       = " << fe_degree_reference << ", "
+        << "n_refine_global_reference = " << n_refine_global_reference << ".\n";
   triangulation.save(filename_reference);
 }
 
@@ -435,7 +466,7 @@ void ArchiveVector<dim>::deserialize(TriangulationType &triangulation,
 
   // Deserialize the coarse triangulation.
   Triangulation<dim> coarse_triangulation;
-  coarse_triangulation.load("coarse_triangulation");
+  coarse_triangulation.load(filename_coarse_triangulation);
 
   // Deserialize the triangulation. That is, recreate the coarse mesh
   // in some way, and then call `load()` to deserialize the triangulation.
@@ -445,8 +476,7 @@ void ArchiveVector<dim>::deserialize(TriangulationType &triangulation,
   // Deserialize the vector as stored in the triangulation.
   dof_handler.clear();
   dof_handler.reinit(triangulation);
-  FE_Q<dim> const fe(fe_degree_reference);
-  dof_handler.distribute_dofs(fe);
+  dof_handler.distribute_dofs(*get_fe_reference());
 
   IndexSet rel_dofs;
   DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
@@ -457,20 +487,16 @@ void ArchiveVector<dim>::deserialize(TriangulationType &triangulation,
 
   // Output the vector.
   pcout << "output vector.l2_norm() = " << vector.l2_norm() << "\n";
-  output_vector<1>(dof_handler, mapping, vector, "reference_read_back");
+  output_vector<dim>(dof_handler, mapping, vector, "reference_read_back");
 }
 
 template <int dim>
-void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
-  const unsigned int fe_degree,
-  const unsigned int n_refine_global) const
+void ArchiveVector<dim>::deserialize_and_check_hp_conversion() const
 {
-  // Serialization based on a common coarse grid and FE_Q space.
-  // Here specifically, we assume that we are using FE_Q elements,
-  // possibly different polynomial orders and different refinement levels.
+  // Serialization based on a common coarse grid space.
   pcout << "Deserializing and checking vector with "
-        << "fe_degree = " << fe_degree << ", "
-        << "n_refine_global = " << n_refine_global << ".\n";
+        << "fe_degree_target       = " << fe_degree_target << ", "
+        << "n_refine_global_target = " << n_refine_global_target << ".\n";
 
   TriangulationType triangulation(mpi_comm);
   VectorType        vector;
@@ -478,30 +504,18 @@ void ArchiveVector<dim>::deserialize_and_check_hp_conversion(
   deserialize(triangulation, dof_handler, vector);
 
   hp_conversion(vector,
-                triangulation,
-                fe_degree_reference,
-                n_refine_global_reference,
-                fe_degree,
-                n_refine_global);
+                triangulation);
 }
 
-// Utility function to perform hp conversion in the same grid using FE_Q
-// elements.
+// Utility function to perform hp conversion in the same coarse grid.
 template <int dim>
 void ArchiveVector<dim>::hp_conversion(
   const VectorType   &vector_in,
-  Triangulation<dim> &triangulation,
-  const unsigned int  fe_degree_in,
-  const unsigned int  n_refine_global_in,
-  const unsigned int  fe_degree_out,
-  const unsigned int  n_refine_global_out) const
+  Triangulation<dim> &triangulation) const
 {
-  // Setup new DoFHandler with FE_Q elements.
+  // Setup new DoFHandler with finite elements to convert.
   DoFHandler<dim> dof_handler_combined(triangulation);
-
-  FE_Q<dim> const       fe_in(fe_degree_in);
-  FE_Q<dim> const       fe_out(fe_degree_out);
-  hp::FECollection<dim> fe_collection(fe_in, fe_out);
+  hp::FECollection<dim> fe_collection(*get_fe_reference(), *get_fe_target());
 
   for (const auto &cell : dof_handler_combined.active_cell_iterators())
     {
@@ -520,10 +534,10 @@ void ArchiveVector<dim>::hp_conversion(
   dealii::DoFTools::extract_locally_relevant_dofs(
     dof_handler_combined, relevant_dofs); // RELEVANT DOFS EXTRACTED HERE
 
-  unsigned int current_refinement_lvl = n_refine_global_in;
+  unsigned int current_refinement_lvl = n_refine_global_reference;
   bool         p_conversion_done      = false;
   while (not p_conversion_done and
-         current_refinement_lvl != n_refine_global_out)
+         current_refinement_lvl != n_refine_global_target)
     {
       VectorType rel_vector_out;
       rel_vector_out.reinit(dof_handler_combined.locally_owned_dofs(),
@@ -535,11 +549,12 @@ void ArchiveVector<dim>::hp_conversion(
       bool p_conversion_done_in_this_cycle = false;
       if (not p_conversion_done)
         {
-          if (fe_degree_out <= fe_degree_in)
+          if (fe_degree_target <= fe_degree_reference)
             {
               pcout << "  performing p conversion in first cycle since "
-                    << fe_degree_out << " <= "
-                    << "fe_degree_in"
+                    << "fe_degree_target = " << fe_degree_target 
+                    << " <= " << fe_degree_reference << " = " 
+                    << "fe_degree_reference"
                     << " \n";
 
               // Conversion in the first cycle renders later cycles cheaper.
@@ -556,11 +571,11 @@ void ArchiveVector<dim>::hp_conversion(
           else
             {
               // Conversion in the last cycle renders earlier cycles cheaper.
-              if (std::abs(static_cast<int>(n_refine_global_out) -
+              if (std::abs(static_cast<int>(n_refine_global_target) -
                            static_cast<int>(current_refinement_lvl)) == 1)
                 {
                   pcout << "  performing p conversion in last cycle since "
-                        << fe_degree_out << " > " << fe_degree_in << " \n";
+                        << fe_degree_target << " > " << fe_degree_reference << " \n";
 
                   for (const auto &cell :
                        dof_handler_combined.active_cell_iterators())
@@ -576,13 +591,13 @@ void ArchiveVector<dim>::hp_conversion(
         }
 
       // Flag for h refinement/coarsening.
-      if (current_refinement_lvl < n_refine_global_out)
+      if (current_refinement_lvl < n_refine_global_target)
         {
           pcout << "  flags for refining in space\n";
           triangulation.set_all_refine_flags();
           current_refinement_lvl += 1;
         }
-      else if (current_refinement_lvl > n_refine_global_out)
+      else if (current_refinement_lvl > n_refine_global_target)
         {
           pcout << "  flags coarsening in space\n";
           for (const auto &cell : triangulation.active_cell_iterators())
@@ -634,11 +649,11 @@ void ArchiveVector<dim>::hp_conversion(
 
   // Output the vector.
   pcout << "output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
-  output_vector<1>(dof_handler_combined,
+  output_vector<dim>(dof_handler_combined,
                    mapping,
                    vector_out,
-                   "comparison_p_" + std::to_string(fe_degree_out) + "_lvl_" +
-                     std::to_string(n_refine_global_out));
+                   "comparison_p_" + std::to_string(fe_degree_target) + "_lvl_" +
+                     std::to_string(n_refine_global_target));
 }
 
 template <int dim>
@@ -660,7 +675,6 @@ void ArchiveVector<dim>::output_points(
 }
 
 template <int dim>
-template <int fe_degree>
 std::vector<Point<dim>> ArchiveVector<dim>::collect_integration_points(
   const DoFHandler<dim> &dof_handler,
   const Quadrature<dim> &quadrature) const
@@ -679,7 +693,7 @@ std::vector<Point<dim>> ArchiveVector<dim>::collect_integration_points(
   AffineConstraints<double>                    empty_constraints;
   matrix_free.reinit(
     mapping, dof_handler, empty_constraints, quadrature, additional_data);
-  FEEvaluation<dim, fe_degree, fe_degree + 1, 1 /* n_components */, double>
+  FEEvaluation<dim, fe_degree_target, fe_degree_target + 1, dim /* n_components */, double>
     fe_eval(matrix_free);
 
   std::vector<Point<dim>> points;
@@ -714,9 +728,7 @@ std::vector<Point<dim>> ArchiveVector<dim>::collect_integration_points(
 }
 
 template <int dim>
-template <int fe_degree>
-void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation(
-  const unsigned int n_refine_global) const
+void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
 {
   // Interpolation onto a non-matching grid with arbitrary FE space.
   pcout << "Mesh to mesh interpolation with arbitrary FE space.\n";
@@ -728,26 +740,33 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation(
   deserialize(source_triangulation, dof_handler_source, source_vector);
 
   // Create target grid: ball within the source triangulation.
-  Point<dim> center;
-  for (unsigned int i = 0; i < dim; ++i)
-    {
-      center[i] = 0.5;
-    }
-  const double      radius = 0.5;
   TriangulationType target_triangulation(mpi_comm);
-  GridGenerator::hyper_ball_balanced(target_triangulation, center, radius);
-  target_triangulation.refine_global(n_refine_global);
+  if constexpr (use_same_grid_as_reference)
+  {
+    GridGenerator::hyper_cube(target_triangulation);
+  }
+  else
+  {
+    Point<dim> center;
+    for (unsigned int i = 0; i < dim; ++i)
+      {
+        center[i] = 0.5;
+      }
+    const double      radius = 0.5;
+    GridGenerator::hyper_ball_balanced(target_triangulation, center, radius);
+  }
+
+  target_triangulation.refine_global(n_refine_global_target);
 
   DoFHandler<dim> dof_handler_target(target_triangulation);
-  FE_Q<dim> const fe(fe_degree);
-  dof_handler_target.distribute_dofs(fe);
+  dof_handler_target.distribute_dofs(*get_fe_target());
 
   if constexpr (false)
     {
       // Collect integration points from target grid.
-      QGauss<dim>                   quadrature(fe_degree + 1);
+      QGauss<dim>                   quadrature(fe_degree_target + 1);
       const std::vector<Point<dim>> integration_points =
-        collect_integration_points<fe_degree>(dof_handler_target, quadrature);
+        collect_integration_points<fe_degree_target>(dof_handler_target, quadrature);
 
       // Setup RemotePointEvaluation.
       typename Utilities::MPI::RemotePointEvaluation<dim>::AdditionalData
@@ -797,7 +816,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation(
                             mpi_comm);
       vector_out = vector_target;
 
-      output_vector<1>(dof_handler_target, mapping, vector_out, "target");
+      output_vector<dim>(dof_handler_target, mapping, vector_out, "target");
     }
 }
 
@@ -809,13 +828,20 @@ void ArchiveVector<dim>::run()
   // the serialization, and then run the deserialization with a different
   // number of MPI ranks.
 
-  // setup_and_serialize(fe_degree_reference, n_refine_global_reference);
+  if (Utilities::MPI::n_mpi_processes(mpi_comm) == 3)
+  {
+    setup_and_serialize();
+  }
+  else
+  {
+    pcout << "       SKIPPING SERIALIZATION TO TEST\n"
+          << "      FOR SERIALIZATION USE 3 MPI RANKS\n"
+          << "(this is for testing only, not a restriction)\n";
+  }
 
-  deserialize_and_check_hp_conversion(4 /* fe_degree */,
-                                      2 /* n_refine_global */);
+  deserialize_and_check_hp_conversion();
 
-  deserialize_and_check_remote_point_evaluation<4 /* fe_degree */>(
-    2 /* n_refine_global */);
+  deserialize_and_check_remote_point_evaluation();
 }
 
 int main(int argc, char *argv[])
