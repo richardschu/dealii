@@ -272,11 +272,11 @@ private:
   std::string const filename_coarse_triangulation = "coarse_triangulation";
   
   static unsigned int constexpr fe_degree_reference       = 4;
-  static unsigned int constexpr fe_degree_target          = 2;
+  static unsigned int constexpr fe_degree_target          = 4;
   static unsigned int constexpr n_refine_global_reference = 2;
-  static unsigned int constexpr n_refine_global_target    = 3;
+  static unsigned int constexpr n_refine_global_target    = 2;
 
-  static bool constexpr use_same_grid_as_reference = false;
+  static bool constexpr use_same_grid_as_reference = true;
   static bool constexpr use_RT_else_DGQ_reference  = true;
   static bool constexpr use_RT_else_DGQ_target     = true;
 
@@ -824,12 +824,19 @@ template <int dim>
 void ArchiveVector<dim>::run()
 {
   // Serialization and deserialization can be run using a different
-  // number of MPI ranks. To test this, uncomment the following, run
-  // the serialization, and then run the deserialization with a different
-  // number of MPI ranks.
+  // number of MPI ranks. To test this, run the deserialization 
+  // with a different number of MPI ranks.
 
   if (Utilities::MPI::n_mpi_processes(mpi_comm) == 3)
   {
+    if constexpr(use_RT_else_DGQ_reference)
+      {
+        pcout << "Using Raviart-Thomas elements for reference.\n";
+      }
+    else
+      {
+        pcout << "Using DGQ elements for reference.\n";
+      }
     setup_and_serialize();
   }
   else
@@ -838,6 +845,15 @@ void ArchiveVector<dim>::run()
           << "      FOR SERIALIZATION USE 3 MPI RANKS      \n"
           << "(this is for testing only, not a restriction)\n\n";
   }
+
+  if constexpr(use_RT_else_DGQ_target)
+    {
+      pcout << "Using Raviart-Thomas elements for target.\n";
+    }
+  else
+    {
+      pcout << "Using DGQ elements for target.\n";
+    }
 
   // deserialize_and_check_hp_conversion();
 
