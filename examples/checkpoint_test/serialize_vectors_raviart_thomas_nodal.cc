@@ -43,8 +43,12 @@
 #include <deal.II/hp/fe_collection.h>
 #include <deal.II/lac/affine_constraints.h>
 #include <deal.II/lac/la_parallel_vector.h>
-#include <deal.II/matrix_free/matrix_free.h>
+#include <deal.II/lac/precondition.h>
+#include <deal.II/lac/solver_cg.h>
+#include <deal.II/lac/solver_control.h>
 #include <deal.II/matrix_free/fe_evaluation.h>
+#include <deal.II/matrix_free/matrix_free.h>
+#include <deal.II/matrix_free/operators.h>
 #include <deal.II/numerics/vector_tools.h>
 #include <deal.II/numerics/data_out.h>
 #include <deal.II/particles/data_out.h>
@@ -53,28 +57,30 @@
 using namespace dealii;
 
 template <int dim>
-class sample_function : public Function<dim>
+class SampleFunction : public Function<dim>
 {
 public:
-  sample_function()
+  SampleFunction()
     : Function<dim>(dim)
   {}
 
-  virtual void vector_value(const Point<dim>  &p,
-                            Vector<double>    &values) const override;
+  virtual void vector_value(const Point<dim> &p,
+                            Vector<double>   &values) const override;
 };
 
 template <int dim>
-void sample_function<dim>::vector_value(const Point<dim> &p,
-                                        Vector<double>   &values) const
+void SampleFunction<dim>::vector_value(const Point<dim> &p,
+                                       Vector<double>   &values) const
 {
-  values[0]   = std::sin(10.0 * p[0]);
-  values[1]   = std::sin(5.0 * p[1]);
-  values[dim-1] = std::sin(1.0 * p[dim-1]);
+  values[0]       = std::sin(10.0 * p[0]);
+  values[1]       = std::sin(5.0 * p[1]);
+  values[dim - 1] = std::sin(1.0 * p[dim - 1]);
 }
 
-namespace ExaDG // exadg/include/exacg/operators/solution_interpolation_between_triangulations.h
+namespace ExaDG
 {
+  // exadg/include/exacg/operators/solution_interpolation_between_triangulations.h
+
   /**
    * Class to transfer solutions between different DoFHandlers via
    * interpolation. This class requires, that the destination DoFHandler has
@@ -217,6 +223,32 @@ namespace ExaDG // exadg/include/exacg/operators/solution_interpolation_between_
     dealii::Utilities::MPI::RemotePointEvaluation<dim>  rpe;
   };
 
+  template <typename VectorType, typename OperatorType>
+  class mfJacobiPreconditioner
+  {
+  public:
+    mfJacobiPreconditioner(OperatorType &underlying_operator_in,
+                           const double  omega_in = 1.0)
+      : underlying_operator(underlying_operator_in)
+      , omega(omega_in)
+    {
+      underlying_operator.compute_diagonal();
+    }
+
+    void vmult(VectorType &dst, const VectorType &src) const
+    {
+      const std::shared_ptr<dealii::DiagonalMatrix<VectorType>>
+        &matrix_diagonal_inverse =
+          underlying_operator.get_matrix_diagonal_inverse();
+      matrix_diagonal_inverse->vmult(dst, src);
+      dst *= omega;
+    }
+
+  private:
+    OperatorType &underlying_operator;
+    const double  omega;
+  };
+
 } // namespace ExaDG
 
 template <int dim>
@@ -241,8 +273,7 @@ private:
                      const VectorType      &vector,
                      const std::string     &filename_basis) const;
 
-  void
-  deserialize_and_check_hp_conversion() const;
+  void deserialize_and_check_hp_conversion() const;
 
   void deserialize(TriangulationType &triangulation,
                    DoFHandler<dim>   &dof_handler,
@@ -261,26 +292,26 @@ private:
   collect_integration_points(const DoFHandler<dim> &dof_handler,
                              const Quadrature<dim> &quadrature) const;
 
-  std::shared_ptr<FiniteElement<dim> const> get_fe_reference() const;
+  std::shared_ptr<const FiniteElement<dim>> get_fe_reference() const;
 
-  std::shared_ptr<FiniteElement<dim> const> get_fe_target() const;
+  std::shared_ptr<const FiniteElement<dim>> get_fe_target() const;
 
-  MPI_Comm            mpi_comm;
-  ConditionalOStream  pcout;
+  MPI_Comm           mpi_comm;
+  ConditionalOStream pcout;
 
-  std::string const filename_reference = "checkpoint_reference";
+  std::string const filename_reference            = "checkpoint_reference";
   std::string const filename_coarse_triangulation = "coarse_triangulation";
-  
+
   static unsigned int constexpr fe_degree_reference       = 4;
   static unsigned int constexpr fe_degree_target          = 4;
   static unsigned int constexpr n_refine_global_reference = 2;
   static unsigned int constexpr n_refine_global_target    = 2;
 
   static bool constexpr use_same_grid_as_reference = true;
-  static bool constexpr use_RT_else_DGQ_reference  = true;
+  static bool constexpr use_RT_else_DGQ_reference  = true; // ##+
   static bool constexpr use_RT_else_DGQ_target     = true;
 
-  MappingQ<dim> const mapping;
+  const MappingQ<dim> mapping;
 };
 
 template <int dim>
@@ -288,17 +319,17 @@ ArchiveVector<dim>::ArchiveVector()
   : mpi_comm(MPI_COMM_WORLD)
   , pcout(std::cout, (Utilities::MPI::this_mpi_process(mpi_comm) == 0))
   , mapping(1)
-{
-}
+{}
 
 template <int dim>
-std::shared_ptr<FiniteElement<dim> const>
+std::shared_ptr<const FiniteElement<dim>>
 ArchiveVector<dim>::get_fe_reference() const
 {
-  std::shared_ptr<FiniteElement<dim> const> fe;
-  if(use_RT_else_DGQ_reference)
+  std::shared_ptr<const FiniteElement<dim>> fe;
+  if (use_RT_else_DGQ_reference)
     {
-      fe = std::make_shared<FE_RaviartThomasNodal<dim>>(fe_degree_reference - 1);
+      fe =
+        std::make_shared<FE_RaviartThomasNodal<dim>>(fe_degree_reference - 1);
     }
   else
     {
@@ -308,11 +339,11 @@ ArchiveVector<dim>::get_fe_reference() const
 }
 
 template <int dim>
-std::shared_ptr<FiniteElement<dim> const>
+std::shared_ptr<const FiniteElement<dim>>
 ArchiveVector<dim>::get_fe_target() const
 {
-  std::shared_ptr<FiniteElement<dim> const> fe;
-  if(use_RT_else_DGQ_target)
+  std::shared_ptr<const FiniteElement<dim>> fe;
+  if (use_RT_else_DGQ_target)
     {
       fe = std::make_shared<FE_RaviartThomasNodal<dim>>(fe_degree_target - 1);
     }
@@ -321,7 +352,7 @@ ArchiveVector<dim>::get_fe_target() const
       fe = std::make_shared<FESystem<dim>>(FE_Q<dim>(fe_degree_target), dim);
     }
   return fe;
-}         
+}
 
 template <int dim>
 template <int n_components>
@@ -365,7 +396,7 @@ void ArchiveVector<dim>::output_vector(const DoFHandler<dim> &dof_handler,
       data_out.add_data_vector(rel_vector, "vector");
     }
 
-  auto const &triangulation = dof_handler.get_triangulation();
+  const auto &triangulation = dof_handler.get_triangulation();
 
   // Add vector indicating subdomain.
   Vector<float> subdomain;
@@ -439,7 +470,7 @@ void ArchiveVector<dim>::setup_and_serialize() const
   DoFTools::extract_locally_relevant_dofs(dof_handler, rel_dofs);
   VectorType vector(dof_handler.locally_owned_dofs(), rel_dofs, mpi_comm);
 
-  VectorTools::interpolate(dof_handler, sample_function<dim>(), vector);
+  VectorTools::interpolate(dof_handler, SampleFunction<dim>(), vector);
 
   vector.update_ghost_values(); // turned out to be required
 
@@ -453,7 +484,8 @@ void ArchiveVector<dim>::setup_and_serialize() const
 
   pcout << "Serializing vector with\n"
         << "  fe_degree_reference       = " << fe_degree_reference << ",\n"
-        << "  n_refine_global_reference = " << n_refine_global_reference << ".\n";
+        << "  n_refine_global_reference = " << n_refine_global_reference
+        << ".\n";
   triangulation.save(filename_reference);
 }
 
@@ -503,18 +535,16 @@ void ArchiveVector<dim>::deserialize_and_check_hp_conversion() const
   DoFHandler<dim>   dof_handler;
   deserialize(triangulation, dof_handler, vector);
 
-  hp_conversion(vector,
-                triangulation);
+  hp_conversion(vector, triangulation);
 }
 
 // Utility function to perform hp conversion in the same coarse grid.
 template <int dim>
-void ArchiveVector<dim>::hp_conversion(
-  const VectorType   &vector_in,
-  Triangulation<dim> &triangulation) const
+void ArchiveVector<dim>::hp_conversion(const VectorType   &vector_in,
+                                       Triangulation<dim> &triangulation) const
 {
   // Setup new DoFHandler with finite elements to convert.
-  DoFHandler<dim> dof_handler_combined(triangulation);
+  DoFHandler<dim>       dof_handler_combined(triangulation);
   hp::FECollection<dim> fe_collection(*get_fe_reference(), *get_fe_target());
 
   for (const auto &cell : dof_handler_combined.active_cell_iterators())
@@ -552,8 +582,8 @@ void ArchiveVector<dim>::hp_conversion(
           if (fe_degree_target <= fe_degree_reference)
             {
               pcout << "  performing p conversion in first cycle since "
-                    << "fe_degree_target = " << fe_degree_target 
-                    << " <= " << fe_degree_reference << " = " 
+                    << "fe_degree_target = " << fe_degree_target
+                    << " <= " << fe_degree_reference << " = "
                     << "fe_degree_reference"
                     << " \n";
 
@@ -575,7 +605,8 @@ void ArchiveVector<dim>::hp_conversion(
                            static_cast<int>(current_refinement_lvl)) == 1)
                 {
                   pcout << "  performing p conversion in last cycle since "
-                        << fe_degree_target << " > " << fe_degree_reference << " \n";
+                        << fe_degree_target << " > " << fe_degree_reference
+                        << " \n";
 
                   for (const auto &cell :
                        dof_handler_combined.active_cell_iterators())
@@ -650,10 +681,10 @@ void ArchiveVector<dim>::hp_conversion(
   // Output the vector.
   pcout << "output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
   output_vector<dim>(dof_handler_combined,
-                   mapping,
-                   vector_out,
-                   "comparison_p_" + std::to_string(fe_degree_target) + "_lvl_" +
-                     std::to_string(n_refine_global_target));
+                     mapping,
+                     vector_out,
+                     "comparison_p_" + std::to_string(fe_degree_target) +
+                       "_lvl_" + std::to_string(n_refine_global_target));
 }
 
 template <int dim>
@@ -693,7 +724,11 @@ std::vector<Point<dim>> ArchiveVector<dim>::collect_integration_points(
   AffineConstraints<double>                    empty_constraints;
   matrix_free.reinit(
     mapping, dof_handler, empty_constraints, quadrature, additional_data);
-  FEEvaluation<dim, fe_degree_target, fe_degree_target + 1, dim /* n_components */, double>
+  FEEvaluation<dim,
+               fe_degree_target,
+               fe_degree_target + 1,
+               dim /* n_components */,
+               double>
     fe_eval(matrix_free);
 
   std::vector<Point<dim>> points;
@@ -722,6 +757,7 @@ std::vector<Point<dim>> ArchiveVector<dim>::collect_integration_points(
     }
 
   // Output the integration points to a file.
+  pcout << "Gathered " << points.size() << " integration points.\n";
   output_points(triangulation, points, "integration_points_target");
 
   return points;
@@ -742,56 +778,219 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
   // Create target grid: ball within the source triangulation.
   TriangulationType target_triangulation(mpi_comm);
   if constexpr (use_same_grid_as_reference)
-  {
-    GridGenerator::hyper_cube(target_triangulation);
-  }
+    {
+      GridGenerator::hyper_cube(target_triangulation);
+    }
   else
-  {
-    Point<dim> center;
-    for (unsigned int i = 0; i < dim; ++i)
-      {
-        center[i] = 0.5;
-      }
-    const double      radius = 0.5;
-    GridGenerator::hyper_ball_balanced(target_triangulation, center, radius);
-  }
+    {
+      Point<dim> center;
+      for (unsigned int i = 0; i < dim; ++i)
+        {
+          center[i] = 0.5;
+        }
+      const double radius = 0.5;
+      GridGenerator::hyper_ball_balanced(target_triangulation, center, radius);
+    }
 
   target_triangulation.refine_global(n_refine_global_target);
 
   DoFHandler<dim> dof_handler_target(target_triangulation);
   dof_handler_target.distribute_dofs(*get_fe_target());
 
-  if constexpr (false)
+  if constexpr (true)
     {
-      // Collect integration points from target grid.
-      QGauss<dim>                   quadrature(fe_degree_target + 1);
-      const std::vector<Point<dim>> integration_points =
-        collect_integration_points<fe_degree_target>(dof_handler_target, quadrature);
+      pcout << "Using global projection on target grid.\n";
 
-      // Setup RemotePointEvaluation.
-      typename Utilities::MPI::RemotePointEvaluation<dim>::AdditionalData
-        rpe_data(1e-12 /* tolerance in reference cell */,
-                 true /* enforce_unique_mapping */,
-                 0 /* rtree_level */,
-                 {} /* marked_vertices */);
-      Utilities::MPI::RemotePointEvaluation<dim> rpe(rpe_data);
+      bool constexpr use_vectortools_projection = false;
+      if constexpr (use_vectortools_projection)
+        {
+          // Solve projection on the target grid using VectorTools::project.
 
-      // Missing: One could do a projection using RemotePointEvaluation,
-      // but we will use the SolutionInterpolationBetweenTriangulations class
-      // instead.
+          VectorType vector_target(dof_handler_target.locally_owned_dofs(),
+                                   mpi_comm);
+          const QGauss<dim> quadrature(
+            std::max(fe_degree_target, fe_degree_reference) + 2);
+          AffineConstraints<double> empty_constraints;
+          empty_constraints.close();
+          VectorTools::project(
+            mapping,
+            dof_handler_target,
+            empty_constraints,
+            quadrature,
+            SampleFunction<dim>(), // uses the analytical function
+            vector_target);
 
-      // Solve projection on the target grid querying RemotePointEvaluation.
-      VectorType vector_target(dof_handler_target.locally_owned_dofs(),
-                               mpi_comm);
-      AffineConstraints<double> empty_constraints;
-      empty_constraints.close();
-      VectorTools::project(
-        mapping,
-        dof_handler_target,
-        empty_constraints,
-        quadrature,
-        sample_function<dim>(), // uses the analytical function
-        vector_target);
+          vector_target.update_ghost_values();
+
+          // Output the vector.
+          pcout << "output vector.l2_norm() = " << vector_target.l2_norm()
+                << "\n";
+          output_vector<dim>(dof_handler_target,
+                             mapping,
+                             vector_target,
+                             "target");
+        }
+      else
+        {
+          // Global projection using RPE.
+
+          // Collect integration points from target grid.
+          const unsigned int n_q_points_1d =
+            std::max(fe_degree_target, fe_degree_reference) + 2;
+          const QGauss<dim>             quadrature(n_q_points_1d);
+          const std::vector<Point<dim>> integration_points_target =
+            collect_integration_points(dof_handler_target, quadrature);
+
+          // Setup RemotePointEvaluation.
+          typename Utilities::MPI::RemotePointEvaluation<dim>::AdditionalData
+            rpe_data(1e-12 /* tolerance in reference cell */,
+                     true /* enforce_unique_mapping */,
+                     0 /* rtree_level */,
+                     {} /* marked_vertices */);
+          Utilities::MPI::RemotePointEvaluation<dim> rpe_source(rpe_data);
+
+          rpe_source.reinit(integration_points_target,
+                            dof_handler_source.get_triangulation(),
+                            mapping);
+
+          AssertThrow(
+            rpe_source.all_points_found(),
+            dealii::ExcMessage(
+              "Could not interpolate source grid vector in target grid."));
+
+          // Evaluate the source vector at the target integration points.
+          source_vector.update_ghost_values();
+          const std::vector<dealii::Tensor<1, dim /*n_components*/>>
+            values_source_in_q_points_target =
+              dealii::VectorTools::point_values<dim /*n_components*/>(
+                rpe_source,
+                dof_handler_source,
+                source_vector,
+                dealii::VectorTools::EvaluationFlags::avg);
+          source_vector.zero_out_ghost_values();
+
+          // Setup MatrixFree object to evaluate the right hand side.
+          using VectorizedArrayType = VectorizedArray<double>;
+          typename MatrixFree<dim, double, VectorizedArrayType>::AdditionalData
+            additional_data;
+          additional_data.tasks_parallel_scheme =
+            MatrixFree<dim, double, VectorizedArrayType>::AdditionalData::none;
+          additional_data.mapping_update_flags =
+            update_quadrature_points | update_values | update_JxW_values;
+
+          std::shared_ptr<MatrixFree<dim, double, VectorizedArrayType>>
+            matrix_free =
+              std::make_shared<MatrixFree<dim, double, VectorizedArrayType>>();
+          AffineConstraints<double> empty_constraints;
+          matrix_free->reinit(mapping,
+                              dof_handler_target,
+                              empty_constraints,
+                              quadrature,
+                              additional_data);
+
+          FEEvaluation<dim,
+                       fe_degree_target,
+                       n_q_points_1d,
+                       dim /* n_components */,
+                       double>
+                              fe_eval(*matrix_free);
+          SampleFunction<dim> sample_function;
+
+          // Assemble right hand side vector for a projection.
+          VectorType system_rhs;
+          matrix_free->initialize_dof_vector(system_rhs);
+
+          unsigned int idx_q_point = 0;
+
+          for (unsigned int cell_batch_idx = 0;
+               cell_batch_idx < matrix_free->n_cell_batches();
+               ++cell_batch_idx)
+            {
+              fe_eval.reinit(cell_batch_idx);
+              for (const unsigned int q : fe_eval.quadrature_point_indices())
+                {
+                  bool constexpr use_analytical_function = false;
+                  if constexpr (not use_analytical_function)
+                    {
+                      // this is not working at the moment, the points cannot be
+                      // indexed like this ##+
+                      fe_eval.submit_value(
+                        values_source_in_q_points_target[idx_q_point], q);
+                      ++idx_q_point;
+                    }
+                  else
+                    {
+                      // Construct the analytical value at this point for
+                      // comparison.
+                      const Point<dim, VectorizedArrayType> cell_batch_points =
+                        fe_eval.quadrature_point(q);
+                      dealii::
+                        Tensor<1, dim /*n_components*/, VectorizedArrayType>
+                          analytical_function;
+                      for (unsigned int i = 0; i < VectorizedArrayType::size();
+                           ++i)
+                        {
+                          Point<dim> p;
+                          for (unsigned int d = 0; d < dim; ++d)
+                            {
+                              p[d] = cell_batch_points[d][i];
+                            }
+
+                          Vector<double> values(dim);
+                          sample_function.vector_value(p, values);
+                          for (unsigned int d = 0; d < dim; ++d)
+                            {
+                              analytical_function[d][i] = values[d];
+                            }
+                        }
+
+                      fe_eval.submit_value(analytical_function, q);
+                    }
+                }
+              fe_eval.integrate(dealii::EvaluationFlags::values);
+              fe_eval.distribute_local_to_global(system_rhs);
+            }
+          system_rhs.compress(VectorOperation::add);
+
+          pcout << "system_rhs.l2_norm()       = " << system_rhs.l2_norm()
+                << "\n";
+
+          // Setup MatrixFreeOPerator::MassOperator
+          using MassOperatorType =
+            MatrixFreeOperators::MassOperator<dim,
+                                              fe_degree_target,
+                                              n_q_points_1d,
+                                              dim /*n_components*/,
+                                              VectorType,
+                                              VectorizedArrayType>;
+          MassOperatorType mass_operator;
+          mass_operator.initialize(matrix_free);
+
+          dealii::ReductionControl reduction_control(
+            10000 /*max_iter*/, 1e-18 * system_rhs.l2_norm(), 1e-18);
+          dealii::SolverCG<VectorType> solver_cg(reduction_control);
+
+          VectorType vector_target;
+          matrix_free->initialize_dof_vector(vector_target);
+
+          ExaDG::mfJacobiPreconditioner<VectorType, MassOperatorType>
+            jacobi_preconditioner(mass_operator, 1.0 /*omega*/);
+
+          solver_cg.solve(mass_operator,
+                          vector_target,
+                          system_rhs,
+                          jacobi_preconditioner);
+          pcout << "reduction_control.last_step() = "
+                << reduction_control.last_step() << "\n";
+
+          // Output the vector.
+          pcout << "output vector.l2_norm() = " << vector_target.l2_norm()
+                << "\n";
+          output_vector<dim>(dof_handler_target,
+                             mapping,
+                             vector_target,
+                             "target");
+        }
     }
   else
     {
@@ -816,6 +1015,8 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
                             mpi_comm);
       vector_out = vector_target;
 
+      // Output the vector.
+      pcout << "output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
       output_vector<dim>(dof_handler_target, mapping, vector_out, "target");
     }
 }
@@ -824,29 +1025,29 @@ template <int dim>
 void ArchiveVector<dim>::run()
 {
   // Serialization and deserialization can be run using a different
-  // number of MPI ranks. To test this, run the deserialization 
+  // number of MPI ranks. To test this, run the deserialization
   // with a different number of MPI ranks.
 
-  if (Utilities::MPI::n_mpi_processes(mpi_comm) == 3)
-  {
-    if constexpr(use_RT_else_DGQ_reference)
-      {
-        pcout << "Using Raviart-Thomas elements for reference.\n";
-      }
-    else
-      {
-        pcout << "Using DGQ elements for reference.\n";
-      }
-    setup_and_serialize();
-  }
+  if constexpr (true) // (Utilities::MPI::n_mpi_processes(mpi_comm) == 3) // ##+
+    {
+      if constexpr (use_RT_else_DGQ_reference)
+        {
+          pcout << "Using Raviart-Thomas elements for reference.\n";
+        }
+      else
+        {
+          pcout << "Using DGQ elements for reference.\n";
+        }
+      setup_and_serialize();
+    }
   else
-  {
-    pcout << "\n         SKIPPING SERIALIZATION            \n"
-          << "      FOR SERIALIZATION USE 3 MPI RANKS      \n"
-          << "(this is for testing only, not a restriction)\n\n";
-  }
+    {
+      pcout << "\n         SKIPPING SERIALIZATION            \n"
+            << "      FOR SERIALIZATION USE 3 MPI RANKS      \n"
+            << "(this is for testing only, not a restriction)\n\n";
+    }
 
-  if constexpr(use_RT_else_DGQ_target)
+  if constexpr (use_RT_else_DGQ_target)
     {
       pcout << "Using Raviart-Thomas elements for target.\n";
     }
