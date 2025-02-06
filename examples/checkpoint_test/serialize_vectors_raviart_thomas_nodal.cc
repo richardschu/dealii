@@ -259,6 +259,7 @@ public:
   using TriangulationType = parallel::distributed::Triangulation<dim>;
   using SolutionTransferType =
     parallel::distributed::SolutionTransfer<dim, VectorType>;
+  using VectorizedArrayType = VectorizedArray<double>;
 
   ArchiveVector();
 
@@ -288,8 +289,10 @@ private:
                      const std::vector<dealii::Point<dim>> &points,
                      const std::string                     &filename) const;
 
+  template <typename MatrixFreeType, typename FEEvalType>
   std::vector<Point<dim>>
-  collect_integration_points(const DoFHandler<dim> &dof_handler,
+  collect_integration_points(const MatrixFreeType  &matrix_free,
+                             FEEvalType            &fe_eval,
                              const Quadrature<dim> &quadrature) const;
 
   std::shared_ptr<const FiniteElement<dim>> get_fe_reference() const;
@@ -307,9 +310,9 @@ private:
   static unsigned int constexpr n_refine_global_reference = 2;
   static unsigned int constexpr n_refine_global_target    = 2;
 
-  static bool constexpr use_same_grid_as_reference = true;
-  static bool constexpr use_RT_else_DGQ_reference  = true; // ##+
-  static bool constexpr use_RT_else_DGQ_target     = true;
+  static bool constexpr use_same_grid_as_reference = false;
+  static bool constexpr use_RT_else_DGQ_reference  = true;
+  static bool constexpr use_RT_else_DGQ_target     = false;
 
   const MappingQ<dim> mapping;
 };
@@ -706,37 +709,21 @@ void ArchiveVector<dim>::output_points(
 }
 
 template <int dim>
+template <typename MatrixFreeType, typename FEEvalType>
 std::vector<Point<dim>> ArchiveVector<dim>::collect_integration_points(
-  const DoFHandler<dim> &dof_handler,
+  const MatrixFreeType  &matrix_free,
+  FEEvalType            &fe_eval,
   const Quadrature<dim> &quadrature) const
 {
+  const DoFHandler<dim>    &dof_handler   = matrix_free->get_dof_handler();
   const Triangulation<dim> &triangulation = dof_handler.get_triangulation();
-
-  using VectorizedArrayType = VectorizedArray<double>;
-  typename MatrixFree<dim, double, VectorizedArrayType>::AdditionalData
-    additional_data;
-  additional_data.tasks_parallel_scheme =
-    MatrixFree<dim, double, VectorizedArrayType>::AdditionalData::none;
-  additional_data.mapping_update_flags =
-    update_quadrature_points; // update_values | update_JxW_values;
-
-  MatrixFree<dim, double, VectorizedArrayType> matrix_free;
-  AffineConstraints<double>                    empty_constraints;
-  matrix_free.reinit(
-    mapping, dof_handler, empty_constraints, quadrature, additional_data);
-  FEEvaluation<dim,
-               fe_degree_target,
-               fe_degree_target + 1,
-               dim /* n_components */,
-               double>
-    fe_eval(matrix_free);
 
   std::vector<Point<dim>> points;
   points.reserve(triangulation.n_active_cells() *
                  quadrature.size()); // conservative estimate
 
   for (unsigned int cell_batch_idx = 0;
-       cell_batch_idx < matrix_free.n_cell_batches();
+       cell_batch_idx < matrix_free->n_cell_batches();
        ++cell_batch_idx)
     {
       fe_eval.reinit(cell_batch_idx);
@@ -834,12 +821,39 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
         {
           // Global projection using RPE.
 
-          // Collect integration points from target grid.
-          const unsigned int n_q_points_1d =
+          // Setup MatrixFree object to evaluate the right hand side.
+          typename MatrixFree<dim, double, VectorizedArrayType>::AdditionalData
+            additional_data;
+          additional_data.tasks_parallel_scheme =
+            MatrixFree<dim, double, VectorizedArrayType>::AdditionalData::none;
+          additional_data.mapping_update_flags =
+            update_quadrature_points | update_values | update_JxW_values;
+
+          std::shared_ptr<MatrixFree<dim, double, VectorizedArrayType>>
+            matrix_free =
+              std::make_shared<MatrixFree<dim, double, VectorizedArrayType>>();
+          AffineConstraints<double> empty_constraints;
+
+          unsigned int constexpr n_q_points_1d =
             std::max(fe_degree_target, fe_degree_reference) + 2;
-          const QGauss<dim>             quadrature(n_q_points_1d);
+          const QGauss<dim> quadrature(n_q_points_1d);
+
+          matrix_free->reinit(mapping,
+                              dof_handler_target,
+                              empty_constraints,
+                              quadrature,
+                              additional_data);
+
+          FEEvaluation<dim,
+                       fe_degree_target,
+                       n_q_points_1d,
+                       dim /* n_components */,
+                       double>
+            fe_eval(*matrix_free);
+
+          // Collect integration points from target grid.
           const std::vector<Point<dim>> integration_points_target =
-            collect_integration_points(dof_handler_target, quadrature);
+            collect_integration_points(matrix_free, fe_eval, quadrature);
 
           // Setup RemotePointEvaluation.
           typename Utilities::MPI::RemotePointEvaluation<dim>::AdditionalData
@@ -869,31 +883,6 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
                 dealii::VectorTools::EvaluationFlags::avg);
           source_vector.zero_out_ghost_values();
 
-          // Setup MatrixFree object to evaluate the right hand side.
-          using VectorizedArrayType = VectorizedArray<double>;
-          typename MatrixFree<dim, double, VectorizedArrayType>::AdditionalData
-            additional_data;
-          additional_data.tasks_parallel_scheme =
-            MatrixFree<dim, double, VectorizedArrayType>::AdditionalData::none;
-          additional_data.mapping_update_flags =
-            update_quadrature_points | update_values | update_JxW_values;
-
-          std::shared_ptr<MatrixFree<dim, double, VectorizedArrayType>>
-            matrix_free =
-              std::make_shared<MatrixFree<dim, double, VectorizedArrayType>>();
-          AffineConstraints<double> empty_constraints;
-          matrix_free->reinit(mapping,
-                              dof_handler_target,
-                              empty_constraints,
-                              quadrature,
-                              additional_data);
-
-          FEEvaluation<dim,
-                       fe_degree_target,
-                       n_q_points_1d,
-                       dim /* n_components */,
-                       double>
-                              fe_eval(*matrix_free);
           SampleFunction<dim> sample_function;
 
           // Assemble right hand side vector for a projection.
@@ -912,11 +901,23 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
                   bool constexpr use_analytical_function = false;
                   if constexpr (not use_analytical_function)
                     {
-                      // this is not working at the moment, the points cannot be
-                      // indexed like this ##+
-                      fe_eval.submit_value(
-                        values_source_in_q_points_target[idx_q_point], q);
-                      ++idx_q_point;
+                      dealii::
+                        Tensor<1, dim /*n_components*/, VectorizedArrayType>
+                          tmp;
+                      for (unsigned int i = 0; i < VectorizedArrayType::size();
+                           ++i)
+                        {
+                          const Tensor<1, dim /*n_components*/> values =
+                            values_source_in_q_points_target[idx_q_point];
+                          ++idx_q_point;
+
+                          for (unsigned int d = 0; d < dim; ++d)
+                            {
+                              tmp[d][i] = values[d];
+                            }
+                        }
+
+                      fe_eval.submit_value(tmp, q);
                     }
                   else
                     {
@@ -1028,7 +1029,7 @@ void ArchiveVector<dim>::run()
   // number of MPI ranks. To test this, run the deserialization
   // with a different number of MPI ranks.
 
-  if constexpr (true) // (Utilities::MPI::n_mpi_processes(mpi_comm) == 3) // ##+
+  if (Utilities::MPI::n_mpi_processes(mpi_comm) == 3)
     {
       if constexpr (use_RT_else_DGQ_reference)
         {
