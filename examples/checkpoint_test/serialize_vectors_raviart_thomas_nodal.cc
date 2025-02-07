@@ -314,6 +314,16 @@ private:
   static bool constexpr use_RT_else_DGQ_reference  = true;
   static bool constexpr use_RT_else_DGQ_target     = false;
 
+  // Scale of target grid with respect to reference grid, which
+  // is a Gridgenerator::hyper_cube with side length 1.0.
+  //
+  // use_same_grid_as_reference == true : GridGenerator::hyper_cube
+  // reference_grid_scale = 1.0 gives a hybercube of halved size
+  //
+  // use_same_grid_as_reference == false: GridGenerator::hyper_ball_balanced
+  // reference_grid_scale = 1.0 gives an inscribed sphere of radius 0.5
+  static double constexpr reference_grid_scale = 1.0;
+
   const MappingQ<dim> mapping;
 };
 
@@ -364,7 +374,7 @@ void ArchiveVector<dim>::output_vector(const DoFHandler<dim> &dof_handler,
                                        const VectorType      &vector,
                                        const std::string &filename_basis) const
 {
-  pcout << "Exporting vector to vtu.\n";
+  pcout << "  Exporting vector to vtu.\n";
 
   // Write higher order output.
   DataOut<dim>          data_out;
@@ -449,7 +459,7 @@ void ArchiveVector<dim>::output_vector(const DoFHandler<dim> &dof_handler,
 template <int dim>
 void ArchiveVector<dim>::setup_and_serialize() const
 {
-  pcout << "Setting up and filling vector.\n";
+  pcout << "  Setting up and filling vector.\n";
 
   // Create and serialize coarse triangulation.
   Triangulation<dim> coarse_triangulation;
@@ -478,14 +488,15 @@ void ArchiveVector<dim>::setup_and_serialize() const
   vector.update_ghost_values(); // turned out to be required
 
   // Output the vector.
-  pcout << "output vector.l2_norm() = " << vector.l2_norm() << "\n";
+  pcout << "  output vector.l2_norm() = " << vector.l2_norm() << "\n";
   output_vector<dim>(dof_handler, mapping, vector, "reference");
 
   // Serialize the vector using SolutionTransferType.
   SolutionTransferType solution_transfer(dof_handler);
   solution_transfer.prepare_for_serialization(vector);
 
-  pcout << "Serializing vector with\n"
+  pcout << "\n\n"
+        << "Serializing vector with\n"
         << "  fe_degree_reference       = " << fe_degree_reference << ",\n"
         << "  n_refine_global_reference = " << n_refine_global_reference
         << ".\n";
@@ -497,7 +508,7 @@ void ArchiveVector<dim>::deserialize(TriangulationType &triangulation,
                                      DoFHandler<dim>   &dof_handler,
                                      VectorType        &vector) const
 {
-  pcout << "Deserializing and checking vector.\n";
+  pcout << " Deserializing and checking vector.\n";
 
   // Deserialize the coarse triangulation.
   Triangulation<dim> coarse_triangulation;
@@ -521,7 +532,7 @@ void ArchiveVector<dim>::deserialize(TriangulationType &triangulation,
   solution_transfer.deserialize(vector);
 
   // Output the vector.
-  pcout << "output vector.l2_norm() = " << vector.l2_norm() << "\n";
+  pcout << "  output vector.l2_norm() = " << vector.l2_norm() << "\n";
   output_vector<dim>(dof_handler, mapping, vector, "reference_read_back");
 }
 
@@ -529,7 +540,8 @@ template <int dim>
 void ArchiveVector<dim>::deserialize_and_check_hp_conversion() const
 {
   // Serialization based on a common coarse grid space.
-  pcout << "Deserializing and checking vector with\n"
+  pcout << "\n\n"
+        << "Deserializing and checking vector with\n"
         << "  fe_degree_target       = " << fe_degree_target << ",\n"
         << "  n_refine_global_target = " << n_refine_global_target << ".\n";
 
@@ -682,7 +694,7 @@ void ArchiveVector<dim>::hp_conversion(const VectorType   &vector_in,
     }
 
   // Output the vector.
-  pcout << "output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
+  pcout << "  output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
   output_vector<dim>(dof_handler_combined,
                      mapping,
                      vector_out,
@@ -744,7 +756,9 @@ std::vector<Point<dim>> ArchiveVector<dim>::collect_integration_points(
     }
 
   // Output the integration points to a file.
-  pcout << "Gathered " << points.size() << " integration points.\n";
+  std::cout << "  Gathered " << points.size() << " integration points on rank "
+            << std::to_string(Utilities::MPI::this_mpi_process(mpi_comm))
+            << ".\n";
   output_points(triangulation, points, "integration_points_target");
 
   return points;
@@ -754,7 +768,8 @@ template <int dim>
 void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
 {
   // Interpolation onto a non-matching grid with arbitrary FE space.
-  pcout << "Mesh to mesh interpolation with arbitrary FE space.\n";
+  pcout << "\n\n"
+        << "Mesh to mesh interpolation with arbitrary FE space.\n";
 
   // Deserialize the grid and vector.
   VectorType        source_vector;
@@ -766,16 +781,27 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
   TriangulationType target_triangulation(mpi_comm);
   if constexpr (use_same_grid_as_reference)
     {
-      GridGenerator::hyper_cube(target_triangulation);
+      GridGenerator::hyper_cube(target_triangulation,
+                                0.0 /*left*/,
+                                0.5 * reference_grid_scale /*right*/);
     }
   else
     {
+      if constexpr (use_RT_else_DGQ_target)
+        {
+          pcout
+            << "  WARNING:\n"
+            << "    Raviart-Thomas elements can only handle grids with uniform\n"
+            << "    orientation, GridGenerator::hyper_ball_balanced() suffers\n"
+            << "    from this known bug!\n";
+        }
+
       Point<dim> center;
       for (unsigned int i = 0; i < dim; ++i)
         {
           center[i] = 0.5;
         }
-      const double radius = 0.5;
+      const double radius = 0.5 * reference_grid_scale;
       GridGenerator::hyper_ball_balanced(target_triangulation, center, radius);
     }
 
@@ -786,7 +812,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
 
   if constexpr (true)
     {
-      pcout << "Using global projection on target grid.\n";
+      pcout << "  Using global projection on target grid.\n";
 
       bool constexpr use_vectortools_projection = false;
       if constexpr (use_vectortools_projection)
@@ -810,7 +836,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
           vector_target.update_ghost_values();
 
           // Output the vector.
-          pcout << "output vector.l2_norm() = " << vector_target.l2_norm()
+          pcout << "  output vector.l2_norm() = " << vector_target.l2_norm()
                 << "\n";
           output_vector<dim>(dof_handler_target,
                              mapping,
@@ -821,7 +847,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
         {
           // Global projection using RPE.
 
-          // Setup MatrixFree object to evaluate the right hand side.
+          // Setup MatrixFree object for right hand side and mass operator.
           typename MatrixFree<dim, double, VectorizedArrayType>::AdditionalData
             additional_data;
           additional_data.tasks_parallel_scheme =
@@ -953,8 +979,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
             }
           system_rhs.compress(VectorOperation::add);
 
-          pcout << "system_rhs.l2_norm()       = " << system_rhs.l2_norm()
-                << "\n";
+          // pcout << "system_rhs.l2_norm() = " << system_rhs.l2_norm() << "\n";
 
           // Setup MatrixFreeOPerator::MassOperator
           using MassOperatorType =
@@ -981,11 +1006,11 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
                           vector_target,
                           system_rhs,
                           jacobi_preconditioner);
-          pcout << "reduction_control.last_step() = "
+          pcout << "  reduction_control.last_step() = "
                 << reduction_control.last_step() << "\n";
 
           // Output the vector.
-          pcout << "output vector.l2_norm() = " << vector_target.l2_norm()
+          pcout << "  output vector.l2_norm() = " << vector_target.l2_norm()
                 << "\n";
           output_vector<dim>(dof_handler_target,
                              mapping,
@@ -996,7 +1021,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
   else
     {
       pcout
-        << "Using SolutionInterpolationBetweenTriangulations::interpolate_solution.\n";
+        << "  Using SolutionInterpolationBetweenTriangulations::interpolate_solution.\n";
       ExaDG::SolutionInterpolationBetweenTriangulations<dim,
                                                         dim /* n_components */>
         interp;
@@ -1017,7 +1042,7 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
       vector_out = vector_target;
 
       // Output the vector.
-      pcout << "output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
+      pcout << "  output vector.l2_norm() = " << vector_out.l2_norm() << "\n";
       output_vector<dim>(dof_handler_target, mapping, vector_out, "target");
     }
 }
@@ -1033,11 +1058,11 @@ void ArchiveVector<dim>::run()
     {
       if constexpr (use_RT_else_DGQ_reference)
         {
-          pcout << "Using Raviart-Thomas elements for reference.\n";
+          pcout << "-> Using Raviart-Thomas elements for reference.\n";
         }
       else
         {
-          pcout << "Using DGQ elements for reference.\n";
+          pcout << "-> Using DGQ elements for reference.\n";
         }
       setup_and_serialize();
     }
@@ -1050,11 +1075,11 @@ void ArchiveVector<dim>::run()
 
   if constexpr (use_RT_else_DGQ_target)
     {
-      pcout << "Using Raviart-Thomas elements for target.\n";
+      pcout << "-> Using Raviart-Thomas elements for target.\n";
     }
   else
     {
-      pcout << "Using DGQ elements for target.\n";
+      pcout << "-> Using DGQ elements for target.\n";
     }
 
   // deserialize_and_check_hp_conversion();
