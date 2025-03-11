@@ -871,8 +871,8 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
                               additional_data);
 
           FEEvaluation<dim,
-                       fe_degree_target,
-                       n_q_points_1d,
+                       -1 /* fe_degree_target */,
+                       0 /* n_q_points_1d */,
                        dim /* n_components */,
                        double>
             fe_eval(*matrix_free);
@@ -984,8 +984,8 @@ void ArchiveVector<dim>::deserialize_and_check_remote_point_evaluation() const
           // Setup MatrixFreeOPerator::MassOperator
           using MassOperatorType =
             MatrixFreeOperators::MassOperator<dim,
-                                              fe_degree_target,
-                                              n_q_points_1d,
+                                              -1 /* fe_degree_target */,
+                                              0 /* n_q_points_1d */,
                                               dim /*n_components*/,
                                               VectorType,
                                               VectorizedArrayType>;
